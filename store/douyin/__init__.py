@@ -158,31 +158,19 @@ async def update_douyin_aweme(aweme_item: Dict):
     aweme_id = aweme_item.get("aweme_id")
     user_info = aweme_item.get("author", {})
     interact_info = aweme_item.get("statistics", {})
+    # 只保留指定的字段: aweme_id, title, desc, create_time, user_id, nickname, liked_count, collected_count, comment_count, share_count, ip_location
     save_content_item = {
         "aweme_id": aweme_id,
-        "aweme_type": str(aweme_item.get("aweme_type")),
         "title": aweme_item.get("desc", ""),
         "desc": aweme_item.get("desc", ""),
         "create_time": aweme_item.get("create_time"),
         "user_id": user_info.get("uid"),
-        "sec_uid": user_info.get("sec_uid"),
-        "short_user_id": user_info.get("short_id"),
-        "user_unique_id": user_info.get("unique_id"),
-        "user_signature": user_info.get("signature"),
         "nickname": user_info.get("nickname"),
-        "avatar": user_info.get("avatar_thumb", {}).get("url_list", [""])[0],
         "liked_count": str(interact_info.get("digg_count")),
         "collected_count": str(interact_info.get("collect_count")),
         "comment_count": str(interact_info.get("comment_count")),
         "share_count": str(interact_info.get("share_count")),
         "ip_location": aweme_item.get("ip_label", ""),
-        "last_modify_ts": utils.get_current_timestamp(),
-        "aweme_url": f"https://www.douyin.com/video/{aweme_id}",
-        "cover_url": _extract_content_cover_url(aweme_item),
-        "video_download_url": _extract_video_download_url(aweme_item),
-        "music_download_url": _extract_music_download_url(aweme_item),
-        "note_download_url": ",".join(_extract_note_image_list(aweme_item)),
-        "source_keyword": source_keyword_var.get(),
     }
     utils.logger.info(f"[store.douyin.update_douyin_aweme] douyin aweme id:{aweme_id}, title:{save_content_item.get('title')}")
     await DouyinStoreFactory.create_store().store_content(content_item=save_content_item)
@@ -202,26 +190,16 @@ async def update_dy_aweme_comment(aweme_id: str, comment_item: Dict):
         return
     user_info = comment_item.get("user", {})
     comment_id = comment_item.get("cid")
-    parent_comment_id = comment_item.get("reply_id", "0")
-    avatar_info = (user_info.get("avatar_medium", {}) or user_info.get("avatar_300x300", {}) or user_info.get("avatar_168x168", {}) or user_info.get("avatar_thumb", {}) or {})
+    # 只保留指定的字段: comment_id, aweme_id, content, create_time, user_id, like_count, sub_comment_count, ip_location
     save_comment_item = {
         "comment_id": comment_id,
-        "create_time": comment_item.get("create_time"),
-        "ip_location": comment_item.get("ip_label", ""),
         "aweme_id": aweme_id,
         "content": comment_item.get("text"),
+        "create_time": comment_item.get("create_time"),
         "user_id": user_info.get("uid"),
-        "sec_uid": user_info.get("sec_uid"),
-        "short_user_id": user_info.get("short_id"),
-        "user_unique_id": user_info.get("unique_id"),
-        "user_signature": user_info.get("signature"),
-        "nickname": user_info.get("nickname"),
-        "avatar": avatar_info.get("url_list", [""])[0],
-        "sub_comment_count": str(comment_item.get("reply_comment_total", 0)),
         "like_count": (comment_item.get("digg_count") if comment_item.get("digg_count") else 0),
-        "last_modify_ts": utils.get_current_timestamp(),
-        "parent_comment_id": parent_comment_id,
-        "pictures": ",".join(_extract_comment_image_list(comment_item)),
+        "sub_comment_count": str(comment_item.get("reply_comment_total", 0)),
+        "ip_location": comment_item.get("ip_label", ""),
     }
     utils.logger.info(f"[store.douyin.update_dy_aweme_comment] douyin aweme comment: {comment_id}, content: {save_comment_item.get('content')}")
 

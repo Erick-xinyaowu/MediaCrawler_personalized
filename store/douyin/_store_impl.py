@@ -26,7 +26,7 @@ import asyncio
 import json
 import os
 import pathlib
-from typing import Dict
+from typing import Dict, Set
 
 from sqlalchemy import select
 
@@ -210,18 +210,79 @@ class DouyinJsonlStoreImplement(AbstractStore):
             crawler_type=crawler_type_var.get(),
             platform="douyin"
         )
+        self._loaded_existing_ids = False
+        self._load_lock = asyncio.Lock()
+        self._existing_aweme_ids: Set[str] = set()
+        self._existing_comment_ids: Set[str] = set()
+
+    async def _load_existing_ids_once(self):
+        """Load IDs from existing JSONL files once to support incremental crawling."""
+        if self._loaded_existing_ids:
+            return
+
+        async with self._load_lock:
+            if self._loaded_existing_ids:
+                return
+
+            contents_path = self.file_writer._get_file_path("jsonl", "contents")
+            comments_path = self.file_writer._get_file_path("jsonl", "comments")
+
+            def _load_ids(file_path: str, field_name: str, target_set: Set[str]):
+                if not os.path.exists(file_path):
+                    return
+                with open(file_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        raw = line.strip()
+                        if not raw:
+                            continue
+                        try:
+                            item = json.loads(raw)
+                        except json.JSONDecodeError:
+                            continue
+                        value = item.get(field_name)
+                        if value is not None:
+                            target_set.add(str(value))
+
+            _load_ids(contents_path, "aweme_id", self._existing_aweme_ids)
+            _load_ids(comments_path, "comment_id", self._existing_comment_ids)
+
+            self._loaded_existing_ids = True
+            utils.logger.info(
+                f"[DouyinJsonlStoreImplement] Incremental mode loaded: "
+                f"{len(self._existing_aweme_ids)} aweme_ids, {len(self._existing_comment_ids)} comment_ids"
+            )
 
     async def store_content(self, content_item: Dict):
+        await self._load_existing_ids_once()
+
+        aweme_id = content_item.get("aweme_id")
+        if aweme_id is None:
+            return
+        aweme_id_str = str(aweme_id)
+        if aweme_id_str in self._existing_aweme_ids:
+            return
+
         await self.file_writer.write_to_jsonl(
             item=content_item,
             item_type="contents"
         )
+        self._existing_aweme_ids.add(aweme_id_str)
 
     async def store_comment(self, comment_item: Dict):
+        await self._load_existing_ids_once()
+
+        comment_id = comment_item.get("comment_id")
+        if comment_id is None:
+            return
+        comment_id_str = str(comment_id)
+        if comment_id_str in self._existing_comment_ids:
+            return
+
         await self.file_writer.write_to_jsonl(
             item=comment_item,
             item_type="comments"
         )
+        self._existing_comment_ids.add(comment_id_str)
 
     async def store_creator(self, creator: Dict):
         await self.file_writer.write_to_jsonl(

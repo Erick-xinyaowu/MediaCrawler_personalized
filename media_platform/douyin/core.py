@@ -18,10 +18,12 @@
 # 使用本代码即表示您同意遵守上述原则和LICENSE中的所有条款。
 
 import asyncio
+import json
 import os
 import random
 from asyncio import Task
-from typing import Any, Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from playwright.async_api import (
     BrowserContext,
@@ -56,6 +58,50 @@ class DouYinCrawler(AbstractCrawler):
         self.index_url = "https://www.douyin.com"
         self.cdp_manager = None
         self.ip_proxy_pool = None  # Proxy IP pool for automatic proxy refresh
+        # Request-level dedupe: skip already crawled and in-run duplicated videos
+        self.existing_aweme_ids: Set[str] = set()
+        self._existing_aweme_ids_loaded = False
+
+    def _load_existing_aweme_ids_once(self):
+        """Load existing aweme IDs from historical JSONL files for incremental crawling."""
+        if self._existing_aweme_ids_loaded:
+            return
+
+        # Only load historical IDs when JSONL storage is used.
+        if config.SAVE_DATA_OPTION != "jsonl":
+            self._existing_aweme_ids_loaded = True
+            return
+
+        if config.SAVE_DATA_PATH:
+            base_path = Path(config.SAVE_DATA_PATH) / "douyin" / "jsonl"
+        else:
+            base_path = Path("data") / "douyin" / "jsonl"
+
+        if not base_path.exists():
+            self._existing_aweme_ids_loaded = True
+            return
+
+        for jsonl_file in base_path.glob("search_contents_*.jsonl"):
+            try:
+                with jsonl_file.open("r", encoding="utf-8") as f:
+                    for line in f:
+                        raw = line.strip()
+                        if not raw:
+                            continue
+                        try:
+                            item = json.loads(raw)
+                        except json.JSONDecodeError:
+                            continue
+                        aweme_id = item.get("aweme_id")
+                        if aweme_id is not None:
+                            self.existing_aweme_ids.add(str(aweme_id))
+            except OSError:
+                continue
+
+        self._existing_aweme_ids_loaded = True
+        utils.logger.info(
+            f"[DouYinCrawler.search] Loaded {len(self.existing_aweme_ids)} existing aweme_ids for request-level dedupe"
+        )
 
     async def start(self) -> None:
         playwright_proxy_format, httpx_proxy_format = None, None
@@ -116,6 +162,7 @@ class DouYinCrawler(AbstractCrawler):
 
     async def search(self) -> None:
         utils.logger.info("[DouYinCrawler.search] Begin search douyin keywords")
+        self._load_existing_aweme_ids_once()
         dy_limit_count = 10  # douyin limit page fixed value
         if config.CRAWLER_MAX_NOTES_COUNT < dy_limit_count:
             config.CRAWLER_MAX_NOTES_COUNT = dy_limit_count
@@ -126,6 +173,7 @@ class DouYinCrawler(AbstractCrawler):
             aweme_list: List[str] = []
             page = 0
             dy_search_id = ""
+            empty_first_page_retries = 2
             while (page - start_page + 1) * dy_limit_count <= config.CRAWLER_MAX_NOTES_COUNT:
                 if page < start_page:
                     utils.logger.info(f"[DouYinCrawler.search] Skip {page}")
@@ -140,6 +188,20 @@ class DouYinCrawler(AbstractCrawler):
                         search_id=dy_search_id,
                     )
                     if posts_res.get("data") is None or posts_res.get("data") == []:
+                        if page == start_page and empty_first_page_retries > 0:
+                            empty_first_page_retries -= 1
+                            utils.logger.warning(
+                                f"[DouYinCrawler.search] empty first page for keyword '{keyword}', retry left: {empty_first_page_retries}"
+                            )
+                            # Refresh search page and cookies before retrying the same page.
+                            try:
+                                await self.context_page.goto(f"https://www.douyin.com/search/{keyword}")
+                                await asyncio.sleep(2)
+                            except Exception as ex:
+                                utils.logger.warning(f"[DouYinCrawler.search] refresh search page failed: {ex}")
+                            await self.dy_client.update_cookies(browser_context=self.browser_context)
+                            dy_search_id = ""
+                            continue
                         utils.logger.info(f"[DouYinCrawler.search] search douyin keyword: {keyword}, page: {page} is empty,{posts_res.get('data')}`")
                         break
                 except DataFetchError:
@@ -157,8 +219,16 @@ class DouYinCrawler(AbstractCrawler):
                         aweme_info: Dict = (post_item.get("aweme_info") or post_item.get("aweme_mix_info", {}).get("mix_items")[0])
                     except TypeError:
                         continue
-                    aweme_list.append(aweme_info.get("aweme_id", ""))
-                    page_aweme_list.append(aweme_info.get("aweme_id", ""))
+                    aweme_id = str(aweme_info.get("aweme_id", ""))
+                    if not aweme_id:
+                        continue
+                    # Skip videos that were already crawled before or appeared in current run.
+                    if aweme_id in self.existing_aweme_ids:
+                        continue
+
+                    self.existing_aweme_ids.add(aweme_id)
+                    aweme_list.append(aweme_id)
+                    page_aweme_list.append(aweme_id)
                     await douyin_store.update_douyin_aweme(aweme_item=aweme_info)
                     await self.get_aweme_media(aweme_item=aweme_info)
                 
